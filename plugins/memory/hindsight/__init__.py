@@ -510,7 +510,13 @@ class HindsightMemoryProvider(MemoryProvider):
             return
         # A previous writer may have exited after shutdown(); allow the fresh one to drain.
         self._shutting_down.clear()
-        thread = _context_thread(self._writer_loop, "hindsight-writer")
+        # Plain thread: each queued job carries its own context snapshot from
+        # _enqueue_retain, so pinning this shared thread to one profile's
+        # context would be wrong (see _enqueue_retain).
+        thread = threading.Thread(
+            target=self._writer_loop, daemon=True, name="hindsight-writer"
+        )
+
         self._writer_thread = self._sync_thread = thread
         thread.start()
 
@@ -1044,10 +1050,20 @@ class HindsightMemoryProvider(MemoryProvider):
             self._last_retained_turn_count = len(self._session_turns)
 
     def _enqueue_retain(self, job: Callable[[], None]) -> None:
-        """Hand *job* to the (lazily started) writer and arm the atexit drain."""
+        """Hand *job* to the (lazily started) writer and arm the atexit drain.
+
+        The job is wrapped in a snapshot of the *enqueueing* context, taken here
+        on the caller's thread while that turn's profile secret scope (and
+        HERMES_HOME override) are still installed. This is required for
+        correctness under gateway multiplexing: the writer is a single
+        long-lived thread shared by every profile, so a context captured once
+        at thread start would pin whichever profile happened to retain first and
+        run all later profiles' jobs under that profile's credentials.
+        """
         self._ensure_writer()
         self._register_atexit()
-        self._retain_queue.put(job)
+        ctx = contextvars.copy_context()
+        self._retain_queue.put(lambda: ctx.run(job))
 
     # -- tools -------------------------------------------------------------------
 

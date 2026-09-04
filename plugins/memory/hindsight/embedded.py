@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agent.secret_scope import get_secret
+from agent.secret_scope import UnscopedSecretError, get_secret
 
 from .settings import _DEFAULT_IDLE_TIMEOUT, _daemon_llm_provider, _parse_int_setting
 
@@ -111,7 +111,25 @@ def _embedded_profile_env_path(config: dict[str, Any]) -> Path:
 
 
 def _embedded_llm_api_key(config: dict[str, Any]) -> str:
-    return config.get("llmApiKey") or config.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", "")
+    """Resolve the embedded-daemon LLM key, tolerating an absent secret scope.
+
+    Callers on a background thread (the daemon starter, the retain writer) have
+    no profile secret scope installed, so ``get_secret`` fails closed under
+    gateway multiplexing. A missing key must never abort daemon startup — the
+    daemon reads its own profile ``.env``, which setup already materialized —
+    so degrade to an empty string and let on-scope callers pass the key in
+    explicitly via the ``llm_api_key=`` keyword.
+    """
+    if configured := (config.get("llmApiKey") or config.get("llm_api_key")):
+        return configured
+    try:
+        return get_secret("HINDSIGHT_LLM_API_KEY", "") or ""
+    except UnscopedSecretError:
+        logger.debug(
+            "Hindsight embedded LLM key requested with no profile secret scope "
+            "active; falling back to the daemon's profile .env value."
+        )
+        return ""
 
 
 def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | None = None) -> dict[str, str]:
