@@ -36,6 +36,7 @@ from .embedded import (
     _RETRIABLE_CONNECTION_MARKERS, _build_embedded_profile_env,
     _check_local_runtime, _embedded_llm_api_key, _embedded_profile_env_path,
     _export_port_health_grace_timeout, _load_simple_env, _local_runtime_hint, _materialize_embedded_profile_env,
+    _reconcile_embedded_profile_env, _resolve_embedded_llm_api_key,
 )
 from .settings import (
     _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_RETAIN_SOURCE,
@@ -822,8 +823,10 @@ class HindsightMemoryProvider(MemoryProvider):
             client = self._get_client()
             profile = self._config.get("profile", "hermes")
             # Profile .env out of sync with config -> rewrite and restart a running daemon.
-            if _load_simple_env(_embedded_profile_env_path(self._config)) != _build_embedded_profile_env(self._config):
-                _materialize_embedded_profile_env(self._config)
+            # Goes through the reconcile boundary: this worker has no profile
+            # secret scope under gateway multiplexing, and must not rewrite the
+            # persisted credential when it cannot know it.
+            if _reconcile_embedded_profile_env(self._config):
                 if client._manager.is_running(profile):
                     _log("\n=== Config changed, restarting daemon ===\n")
                     client._manager.stop(profile)
